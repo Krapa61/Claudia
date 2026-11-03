@@ -1,0 +1,6 @@
+{
+  "name": "Claudia AI",
+  "description": "An intelligent business assistant that can answer questions, manage approved business workflows, and access connected services through n8n.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
