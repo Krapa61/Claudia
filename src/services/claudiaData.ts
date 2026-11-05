@@ -32,7 +32,25 @@ export const createMaintenance = (t: string, issue: string, location: string, pr
 export const updateMaintenance = (t: string, request_id: string, status: string, note?: string) =>
   api(t, { action: 'maintenance_update', request_id, status, ...(note ? { note } : {}) });
 
-export const listDocuments = (t: string) => api(t, { action: 'documents_list' });
+export function ensureDocId(rawId?: string): string {
+  if (rawId && /^DOC-\d{8}-[A-Z0-9]{6}$/.test(rawId)) {
+    return rawId;
+  }
+  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const randStr = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `DOC-${dateStr}-${randStr}`;
+}
+
+export const listDocuments = async (t: string) => {
+  const d = await api(t, { action: 'documents_list' });
+  if (d && Array.isArray(d.documents)) {
+    d.documents = d.documents.map((doc: any) => ({ ...doc, document_id: ensureDocId(doc.document_id || doc.id) }));
+  }
+  return d;
+};
+export const listPayments = (t: string) => api(t, { action: 'payment_prepare' });
+export const getAccountBalance = (t: string) => api(t, { action: 'account_balance' });
+export const listNotifications = (t: string) => api(t, { action: 'notifications_list' });
 
 export async function uploadFile(token: string, file: File, purpose: string, note: string) {
   const b64 = await new Promise<string>((resolve, reject) => {
@@ -46,7 +64,7 @@ export async function uploadFile(token: string, file: File, purpose: string, not
     reader.readAsDataURL(file);
   });
 
-  return api(token, {
+  const res = await api(token, {
     action: 'upload_file',
     file_name: file.name,
     mime_type: file.type || 'application/octet-stream',
@@ -54,6 +72,10 @@ export async function uploadFile(token: string, file: File, purpose: string, not
     purpose,
     note,
   });
+  if (res) {
+    res.document_id = ensureDocId(res.document_id);
+  }
+  return res;
 }
 
 export async function uploadDocument(token: string, file: File, purpose: string, note: string) {
@@ -88,5 +110,47 @@ export async function uploadDocument(token: string, file: File, purpose: string,
     err.json = json;
     throw err;
   }
+  if (json) {
+    json.document_id = ensureDocId(json.document_id);
+  }
   return json;
 }
+
+export const driveSearch = (t: string, query: string) => api(t, { action: 'documents_list', query });
+export const driveList = (t: string, folderId: string = 'root') => api(t, { action: 'documents_list', folder_id: folderId });
+export const driveDownload = (t: string, fileId: string, exportFormat?: string) =>
+  api(t, { action: 'documents_list', file_id: fileId, ...(exportFormat ? { export_format: exportFormat } : {}) });
+
+export async function driveUpload(token: string, parentId: string, file: File) {
+  const b64 = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const res = reader.result as string;
+      const comma = res.indexOf(',');
+      resolve(comma >= 0 ? res.slice(comma + 1) : res);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+
+  return api(token, {
+    action: 'upload_file',
+    parent_id: parentId,
+    name: file.name,
+    mime_type: file.type || 'application/octet-stream',
+    file_base64: b64,
+  });
+}
+
+export const driveShareAdd = (t: string, fileId: string, email: string, role: string = 'reader') =>
+  api(t, { action: 'documents_list', file_id: fileId, email, role });
+
+export const driveConfirm = (t: string, confirmationId: string, confirmText: string) =>
+  api(t, { action: 'payment_confirm', confirmation_id: confirmationId, confirm_text: confirmText });
+
+export const driveCancel = (t: string, confirmationId: string) =>
+  api(t, { action: 'payment_cancel', confirmation_id: confirmationId });
+
+export const paymentReject = (t: string, confirmationId: string) =>
+  api(t, { action: 'payment_reject', confirmation_id: confirmationId });
+

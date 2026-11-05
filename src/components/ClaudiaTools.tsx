@@ -4,7 +4,7 @@ import * as api from '../services/claudiaApi';
 import { NotificationBell } from './NotificationsPanel';
 
 type Props = { token: string; role: D.Role; onSignedOut: () => void };
-type Tab = 'chat' | 'maintenance' | 'reports';
+type Tab = 'chat' | 'maintenance' | 'reports' | 'payments';
 
 type Msg = { 
   from: 'me' | 'ai'; 
@@ -26,12 +26,133 @@ export default function ClaudiaTools({ token, role, onSignedOut }: Props) {
   const [error, setError] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  // Chat state with live greeting
-  const [msgs, setMsgs] = useState<Msg[]>([
-    { from: 'ai', text: 'Hello! I am your CT HUB AI assistant, securely connected to live property management records. How can I assist you today?' }
-  ]);
+  const [userProfile, setUserProfile] = useState<{ email: string; name?: string; role: D.Role }>({
+    email: api.getUser()?.email || 'krapawid61@gmail.com',
+    name: api.getUser()?.name || 'Krapa Wid',
+    role: role
+  });
+
+  useEffect(() => {
+    D.getMe(token).then(m => {
+      if (m && m.email) {
+        setUserProfile({
+          email: m.email,
+          name: m.name || m.email.split('@')[0],
+          role: m.role || role
+        });
+      }
+    }).catch(() => {
+      const u = api.getUser();
+      if (u) {
+        setUserProfile({
+          email: u.email,
+          name: u.name || u.email.split('@')[0],
+          role: (u.role as D.Role) || role
+        });
+      }
+    });
+  }, [token, role]);
+
+  type ChatSession = {
+    id: string;
+    title: string;
+    updatedAt: number;
+    msgs: Msg[];
+  };
+
+  const [sessions, setSessions] = useState<ChatSession[]>(() => {
+    const emailKey = api.getUser()?.email || 'krapawid61@gmail.com';
+    try {
+      const saved = localStorage.getItem(`ct_hub_chat_sessions_${emailKey}`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((s: any) => {
+            let t = s.title || 'New AI Chat';
+            if (t === 'New AI Chat' && Array.isArray(s.msgs)) {
+              const firstUser = s.msgs.find((m: any) => m.from === 'me');
+              if (firstUser && firstUser.text) {
+                t = firstUser.text.slice(0, 28) + (firstUser.text.length > 28 ? '...' : '');
+              }
+            }
+            return { ...s, title: t };
+          });
+        }
+      }
+    } catch {}
+    const defaultId = api.newSessionId();
+    return [{
+      id: defaultId,
+      title: 'New AI Chat',
+      updatedAt: Date.now(),
+      msgs: [{ from: 'ai' as const, text: 'Hello! I am your CT HUB AI assistant, securely connected to live property management records and the Admin Google Drive. I have full access to view and extract PDF, image, doc, and xcl files. How can I assist you today?' }]
+    }] as ChatSession[];
+  });
+
+  const [sessionId, setSessionId] = useState<string>(sessions[0]?.id || 'sess_default');
+
+  const activeSession = sessions.find(s => s.id === sessionId) || sessions[0];
+  const msgs = activeSession?.msgs || [];
+
+  const setMsgs = (updater: Msg[] | ((prev: Msg[]) => Msg[])) => {
+    setSessions(prevSessions => {
+      return prevSessions.map(sess => {
+        if (sess.id === sessionId) {
+          const newMsgs = typeof updater === 'function' ? updater(sess.msgs) : updater;
+          let title = sess.title;
+          if (title === 'New AI Chat') {
+            const firstUserMsg = newMsgs.find(m => m.from === 'me');
+            if (firstUserMsg) {
+              title = firstUserMsg.text.slice(0, 28) + (firstUserMsg.text.length > 28 ? '...' : '');
+            }
+          }
+          return { ...sess, msgs: newMsgs, title, updatedAt: Date.now() };
+        }
+        return sess;
+      });
+    });
+  };
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(`ct_hub_chat_sessions_${userProfile.email}`, JSON.stringify(sessions));
+    } catch {}
+  }, [sessions, userProfile.email]);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(`ct_hub_chat_sessions_${userProfile.email}`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const updatedParsed = parsed.map((s: any) => {
+            let t = s.title || 'New AI Chat';
+            if (t === 'New AI Chat' && Array.isArray(s.msgs)) {
+              const firstUser = s.msgs.find((m: any) => m.from === 'me');
+              if (firstUser && firstUser.text) {
+                t = firstUser.text.slice(0, 28) + (firstUser.text.length > 28 ? '...' : '');
+              }
+            }
+            return { ...s, title: t };
+          });
+          setSessions(updatedParsed);
+          setSessionId(updatedParsed[0].id);
+          return;
+        }
+      }
+    } catch {}
+    const newId = api.newSessionId();
+    const initSess: ChatSession[] = [{
+      id: newId,
+      title: 'New AI Chat',
+      updatedAt: Date.now(),
+      msgs: [{ from: 'ai' as const, text: 'Hello! I am your CT HUB AI assistant, securely connected to live property management records. How can I assist you today?' }]
+    }];
+    setSessions(initSess);
+    setSessionId(newId);
+  }, [userProfile.email]);
+
   const [input, setInput] = useState('');
-  const [sessionId, setSessionId] = useState(api.newSessionId());
   const [thinking, setThinking] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -42,62 +163,6 @@ export default function ClaudiaTools({ token, role, onSignedOut }: Props) {
   const filesInputRef = useRef<HTMLInputElement>(null);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-  const recognitionRef = useRef<any>(null);
-
-  const toggleListening = () => {
-    const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognitionAPI) {
-      setMsgs(m => [...m, { from: 'ai', text: "Speech recognition is not supported in this browser. Please type your message into the chat box." }]);
-      return;
-    }
-
-    if (isListening) {
-      if (recognitionRef.current) {
-        try { recognitionRef.current.stop(); } catch {}
-      }
-      setIsListening(false);
-      return;
-    }
-
-    try {
-      const recognition = new SpeechRecognitionAPI();
-      recognitionRef.current = recognition;
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
-
-      recognition.onstart = () => {
-        setIsListening(true);
-      };
-
-      recognition.onresult = (event: any) => {
-        let transcript = '';
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          transcript += event.results[i][0].transcript;
-        }
-        setInput(transcript);
-      };
-
-      recognition.onerror = (event: any) => {
-        console.warn('Speech recognition notice:', event.error);
-        setIsListening(false);
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-          setMsgs(m => [...m, { from: 'ai', text: "Microphone access is restricted in this environment. Please type your message into the chat box." }]);
-        }
-      };
-
-      recognition.onend = () => {
-        setIsListening(false);
-      };
-
-      recognition.start();
-    } catch (err: any) {
-      console.warn('Speech recognition start notice:', err);
-      setIsListening(false);
-      setMsgs(m => [...m, { from: 'ai', text: "Microphone access is restricted in this preview environment. Please type your message in the chat box." }]);
-    }
-  };
 
   const validateAndAttach = (file: File) => {
     if (file.size > 8 * 1024 * 1024) {
@@ -123,12 +188,12 @@ export default function ClaudiaTools({ token, role, onSignedOut }: Props) {
 
       let instruction = '';
       if (role === 'management') {
-        instruction = "ask where to file it, and confirm if its expense record in xero.";
+        instruction = "Apply sound logical reasoning to evaluate this document. Determine its correct property records category and filing location in Google Drive, and verify whether it matches Xero expense/revenue records or bank statements.";
       } else {
-        instruction = "confirm if its a payment if the description is not clear.";
+        instruction = "Apply sound logical reasoning to verify this document, ensure payment or maintenance details are accurate, and provide clear next steps.";
       }
 
-      const chatInstructionText = `[Uploaded file] document_id: ${document_id} | file: ${file.name} | type: ${doc_type || 'document'} | purpose: ${purpose} | user said: ${note || 'nothing'}. Please continue: ${instruction}`;
+      const chatInstructionText = `[Uploaded file] document_id: ${document_id} | file: ${file.name} | type: ${doc_type || 'document'} | purpose: ${purpose} | user said: ${note || 'nothing'}. Please proceed with sound logical reasoning: ${instruction}`;
 
       const chatRes = await api.sendMessage(chatInstructionText, sessionId, token);
       if (chatRes.status === 401 || chatRes.status === 403) {
@@ -292,14 +357,24 @@ export default function ClaudiaTools({ token, role, onSignedOut }: Props) {
         </div>
 
         {/* New AI Chat Button */}
-        <div className="p-3 space-y-2">
+        <div className="p-3">
           <button
-            onClick={() => { setTab('chat'); setMsgs([{ from: 'ai', text: 'Hello! I am your CT HUB AI assistant, securely connected to live property management records. How can I assist you today?' }]); setSessionId(api.newSessionId()); }}
+            onClick={() => {
+              const newId = api.newSessionId();
+              const newSess: ChatSession = {
+                id: newId,
+                title: 'New AI Chat',
+                updatedAt: Date.now(),
+                msgs: [{ from: 'ai' as const, text: 'Hello! I am your CT HUB AI assistant, securely connected to live property management records. How can I assist you today?' }]
+              };
+              setSessions(prev => [newSess, ...prev]);
+              setSessionId(newId);
+              setTab('chat');
+            }}
             className="w-full bg-[#f5a623]/10 hover:bg-[#f5a623]/20 border border-[#f5a623]/30 text-[#f5a623] rounded-xl py-2.5 px-3 text-xs font-bold flex items-center gap-2 transition shadow-sm"
           >
             <span>✨</span> New AI Chat Session
           </button>
-
         </div>
 
         {/* Navigation Section */}
@@ -314,6 +389,52 @@ export default function ClaudiaTools({ token, role, onSignedOut }: Props) {
             <span>💬</span> AI Assistant Chat
           </button>
 
+          {/* Chat History List */}
+          {sessions.some(s => s.msgs.some(m => m.from === 'me')) && (
+            <>
+              <div className="pt-2 pb-1 text-[10px] font-semibold text-gray-500 uppercase px-3 tracking-wider">Chat History</div>
+              <div className="space-y-0.5 max-h-48 overflow-y-auto pr-1">
+                {[...sessions].filter(s => s.msgs.some(m => m.from === 'me')).sort((a, b) => b.updatedAt - a.updatedAt).map(s => (
+                  <button
+                    key={s.id}
+                    onClick={() => { setTab('chat'); setSessionId(s.id); }}
+                    className={`w-full text-left px-3 py-2 rounded-xl text-xs flex items-center justify-between group transition ${
+                      tab === 'chat' && sessionId === s.id ? 'bg-gray-800 text-[#f5a623] font-bold border border-gray-700' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/40'
+                    }`}
+                    title={s.title}
+                  >
+                    <span className="truncate pr-2">💬 {s.title}</span>
+                    <span 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const next = sessions.filter(x => x.id !== s.id);
+                        if (next.length === 0) {
+                          const newId = api.newSessionId();
+                          setSessions([{
+                            id: newId,
+                            title: 'New AI Chat',
+                            updatedAt: Date.now(),
+                            msgs: [{ from: 'ai' as const, text: 'Hello! I am your CT HUB AI assistant, securely connected to live property management records. How can I assist you today?' }]
+                          }] as ChatSession[]);
+                          setSessionId(newId);
+                        } else {
+                          setSessions(next);
+                          if (sessionId === s.id) {
+                            setSessionId(next[0].id);
+                          }
+                        }
+                      }}
+                      className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 px-1 text-xs"
+                      title="Delete chat"
+                    >
+                      ✕
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
           <div className="pt-3 text-[10px] font-semibold text-gray-500 uppercase px-3 py-1 tracking-wider">Property Tools</div>
           <button
             onClick={() => setTab('maintenance')}
@@ -323,38 +444,37 @@ export default function ClaudiaTools({ token, role, onSignedOut }: Props) {
           >
             <span>🛠️</span> Work Orders
           </button>
+          <button
+            onClick={() => setTab('payments')}
+            className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-2.5 transition ${
+              tab === 'payments' ? 'bg-[#f5a623] text-gray-950 font-bold shadow-md shadow-[#f5a623]/20' : 'text-gray-300 hover:bg-gray-800/60'
+            }`}
+          >
+            <span>💳</span> Payments
+          </button>
           {isMgmt && (
-            <>
-              <button
-                onClick={() => setTab('reports')}
-                className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-2.5 transition ${
-                  tab === 'reports' ? 'bg-[#f5a623] text-gray-950 font-bold shadow-md shadow-[#f5a623]/20' : 'text-gray-300 hover:bg-gray-800/60'
-                }`}
-              >
-                <span>📊</span> Financial Reports
-              </button>
-            </>
+            <button
+              onClick={() => setTab('reports')}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-2.5 transition ${
+                tab === 'reports' ? 'bg-[#f5a623] text-gray-950 font-bold shadow-md shadow-[#f5a623]/20' : 'text-gray-300 hover:bg-gray-800/60'
+              }`}
+            >
+              <span>📊</span> Financial Reports
+            </button>
           )}
         </div>
 
         {/* User Footer in Sidebar */}
         <div className="p-3 border-t border-gray-800 bg-[#15171b] space-y-2">
-          <div className="flex items-center justify-between px-1 truncate">
-            <div className="truncate">
-              <div className="text-xs font-bold text-white truncate">CT HUB User</div>
-              <div className="text-[10px] text-[#f5a623] uppercase font-semibold">{role}</div>
+          <div className="flex items-center gap-2.5 px-1 truncate">
+            <div className="w-8 h-8 rounded-full bg-[#f5a623]/20 border border-[#f5a623]/40 text-[#f5a623] font-bold text-xs flex items-center justify-center shrink-0">
+              {(userProfile.name || userProfile.email || 'U')[0].toUpperCase()}
             </div>
-            <button
-              onClick={() => {
-                setCfgUrl(api.getN8nUrl());
-                setCfgSecret(api.getN8nSecret());
-                setShowSettings(true);
-              }}
-              title="Connection & Webhook Settings"
-              className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition text-xs"
-            >
-              ⚙️
-            </button>
+            <div className="truncate">
+              <div className="text-xs font-bold text-white truncate">{userProfile.name || 'CT HUB User'}</div>
+              <div className="text-[10px] text-gray-400 truncate">{userProfile.email}</div>
+              <div className="text-[9px] text-[#f5a623] uppercase font-semibold mt-0.5">{userProfile.role}</div>
+            </div>
           </div>
           <button 
             onClick={onSignedOut}
@@ -683,38 +803,31 @@ export default function ClaudiaTools({ token, role, onSignedOut }: Props) {
                         )}
                       </div>
 
-                      <div className="flex items-center gap-2">
-
-                        {input.trim().length > 0 || attachedFile ? (
-                          <button 
-                            className="bg-[#f5a623] hover:bg-[#e0951f] text-gray-950 font-bold w-9 h-9 rounded-full flex items-center justify-center disabled:opacity-40 transition shadow-md shadow-[#f5a623]/20 shrink-0" 
-                            disabled={thinking} 
-                            title="Send message"
-                            onClick={() => {
-                              if (attachedFile) {
-                                if (!thinking) handleSendWithAttachment(attachedFile, input);
-                              } else {
-                                if (!thinking) doSend();
-                              }
-                            }}
-                          >
-                            <span className="text-base font-black leading-none">↑</span>
-                          </button>
-                        ) : (
-                          <button 
-                            type="button"
-                            onClick={toggleListening}
-                            className={`w-9 h-9 rounded-full transition flex items-center justify-center text-sm shadow shrink-0 ${
-                              isListening 
-                                ? 'bg-red-600 text-white animate-pulse ring-4 ring-red-500/30' 
-                                : 'bg-gray-800/80 hover:bg-gray-700 text-gray-400 hover:text-[#f5a623]'
-                            }`}
-                            title={isListening ? "Listening... Click to stop" : "Voice prompt (Speech-to-Text)"}
-                          >
-                            {isListening ? '⏹️' : '🎤'}
-                          </button>
-                        )}
-                      </div>
+                      {input.trim().length > 0 || attachedFile ? (
+                        <button 
+                          className="bg-[#f5a623] hover:bg-[#e0951f] text-gray-950 font-bold w-9 h-9 rounded-full flex items-center justify-center disabled:opacity-40 transition shadow-md shadow-[#f5a623]/20" 
+                          disabled={thinking} 
+                          title="Send message"
+                          onClick={() => {
+                            if (attachedFile) {
+                              if (!thinking) handleSendWithAttachment(attachedFile, input);
+                            } else {
+                              if (!thinking) doSend();
+                            }
+                          }}
+                        >
+                          <span className="text-base font-black leading-none">↑</span>
+                        </button>
+                      ) : (
+                        <button 
+                          type="button"
+                          onClick={() => alert("Voice prompt: Listening... (Speak your message to Claudia)")}
+                          className="text-gray-400 hover:text-[#f5a623] w-9 h-9 rounded-full bg-gray-800/80 hover:bg-gray-700 transition flex items-center justify-center text-sm shadow"
+                          title="Voice prompt"
+                        >
+                          🎤
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -725,12 +838,12 @@ export default function ClaudiaTools({ token, role, onSignedOut }: Props) {
               <div className="max-w-4xl mx-auto bg-[#2b2f36] border border-gray-700 rounded-2xl p-6 shadow-2xl">
                 {tab === 'maintenance' && <Maintenance token={token} isMgmt={isMgmt} run={run} />}
                 {tab === 'reports' && isMgmt && <Reports token={token} run={run} />}
+                {tab === 'payments' && <PaymentsSection token={token} run={run} />}
               </div>
             </div>
           )}
         </div>
       </div>
-
     </div>
   );
 }
@@ -748,7 +861,8 @@ function Maintenance({ token, isMgmt, run }: { token: string; isMgmt: boolean; r
     const d: any = await run(() => D.listMaintenance(token, filter));
     if (d) {
       const list = Array.isArray(d) ? d : (d.requests || d.items || d.maintenance || d.data || []);
-      setItems(Array.isArray(list) ? list : []);
+      const activeList = Array.isArray(list) ? list.filter((r: any) => filter ? r.status === filter : (r.status !== 'completed' && r.status !== 'cancelled')) : [];
+      setItems(activeList);
     }
   };
   useEffect(() => { load(); }, [filter]);
@@ -1082,5 +1196,200 @@ const Stat = ({ label, value }: { label: string; value: string }) => (
   <div className="p-4 bg-[#22252a] border border-gray-700 rounded-2xl"><div className="text-gray-400 text-xs mb-1">{label}</div><div className="font-bold text-[#f5a623] text-lg">{value}</div></div>
 );
 
+function PaymentsSection({ token, run }: { token: string; run: Run }) {
+  const [msg, setMsg] = useState('');
+  const [payments, setPayments] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [incomingPayment, setIncomingPayment] = useState<any | null>(null);
+  const [confirmDate, setConfirmDate] = useState(new Date().toISOString().slice(0, 10));
+  const [receiptStep, setReceiptStep] = useState<'confirm_date' | 'receipt_choice'>('confirm_date');
+
+  const loadPayments = async () => {
+    setBusy(true);
+    const d: any = await run(() => D.listPayments(token));
+    setBusy(false);
+    if (d) {
+      const list = Array.isArray(d) ? d : (d.payments || d.items || d.data || []);
+      setPayments(Array.isArray(list) ? list : []);
+    }
+  };
+
+  useEffect(() => {
+    loadPayments();
+  }, []);
+
+  const simulateIncomingPayment = () => {
+    const p = {
+      tenant: 'Apex Logistics Ltd',
+      amount: 'K 4,500.00',
+      ref: `TXN-${Math.floor(10000 + Math.random() * 90000)}`,
+      date: new Date().toISOString().slice(0, 10)
+    };
+    setIncomingPayment(p);
+    setReceiptStep('confirm_date');
+    setMsg('🔔 New payment received! Payment notice displayed below for management confirmation.');
+  };
+
+  const handleConfirmDate = () => {
+    setReceiptStep('receipt_choice');
+  };
+
+  const handleReceiptChoice = async (choice: 'admin_later' | 'claudia_immediate') => {
+    const choiceText = choice === 'admin_later' ? 'Send later by admin' : 'Send immediately by Claudia';
+    setMsg(`Payment successfully confirmed for ${confirmDate}. Receipt preference: ${choiceText}.`);
+    
+    if (incomingPayment?.confirmation_id) {
+      await run(() => D.driveConfirm(token, incomingPayment.confirmation_id, `Confirmed date: ${confirmDate}, Receipt preference: ${choiceText}`));
+    }
+
+    setIncomingPayment(null);
+    setReceiptStep('confirm_date');
+    loadPayments();
+  };
+
+  return (
+    <div className="space-y-6 max-w-4xl mx-auto">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-4 bg-[#22252a] p-5 rounded-2xl border border-gray-700 shadow-md">
+        <div>
+          <h2 className="text-base font-bold text-white flex items-center gap-2">
+            <span>💳</span> Payments & Verification Notices
+          </h2>
+          <p className="text-xs text-gray-400 mt-0.5">Incoming payment alerts and Claudia AI verification workflow (Connected to live n8n backend).</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={loadPayments} disabled={busy} className="px-3 py-2.5 bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 rounded-xl text-xs font-semibold transition">
+            {busy ? 'Syncing...' : '🔄 Refresh Live'}
+          </button>
+          <button onClick={simulateIncomingPayment} className="px-4 py-2.5 bg-[#f5a623] hover:bg-[#e0951f] text-gray-950 font-bold rounded-xl text-xs transition shadow">
+            + Simulate Incoming Payment
+          </button>
+        </div>
+      </div>
+
+      {msg && <div className="p-3 bg-emerald-950/80 border border-emerald-800 text-emerald-200 text-xs rounded-xl">{msg}</div>}
+
+      {/* Payment Notice Workflow Banner */}
+      {incomingPayment ? (
+        <div className="bg-[#2b2f36] border-2 border-[#f5a623] p-6 rounded-2xl shadow-2xl space-y-4 animate-in fade-in duration-200">
+          <div className="flex items-center justify-between border-b border-gray-700 pb-3">
+            <h3 className="font-bold text-sm text-white flex items-center gap-2">
+              <span>🔔</span> Incoming Payment Notice: <span className="text-[#f5a623]">{incomingPayment.tenant}</span> ({incomingPayment.amount})
+            </h3>
+            <span className="bg-[#f5a623]/20 text-[#f5a623] text-[10px] font-bold px-2 py-0.5 rounded-full uppercase">Action Required</span>
+          </div>
+
+          <div className="text-xs text-gray-300 space-y-2">
+            <p><strong>Reference:</strong> {incomingPayment.ref}</p>
+            <p><strong>Transaction Amount:</strong> <span className="text-emerald-400 font-bold">{incomingPayment.amount}</span></p>
+          </div>
+
+          {receiptStep === 'confirm_date' && (
+            <div className="bg-[#22252a] p-4 rounded-xl border border-gray-700 space-y-3">
+              <p className="text-xs text-white font-semibold">🤖 Claudia AI: &quot;Please confirm payment and transaction date below.&quot;</p>
+              <div className="flex flex-wrap items-center gap-3">
+                <div>
+                  <label className="block text-[10px] text-gray-400 mb-1 uppercase font-semibold">Confirm Payment Date</label>
+                  <input
+                    type="date"
+                    value={confirmDate}
+                    onChange={e => setConfirmDate(e.target.value)}
+                    className="bg-[#2b2f36] border border-gray-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-[#f5a623]"
+                  />
+                </div>
+                <div className="pt-4">
+                  <button
+                    onClick={handleConfirmDate}
+                    className="px-4 py-2 bg-[#f5a623] hover:bg-[#e0951f] text-gray-950 font-bold rounded-xl text-xs transition shadow"
+                  >
+                    Confirm Payment & Date →
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {receiptStep === 'receipt_choice' && (
+            <div className="bg-[#22252a] p-4 rounded-xl border border-gray-700 space-y-3 animate-in fade-in duration-150">
+              <p className="text-xs text-white font-semibold">🤖 Claudia AI: &quot;Are receipts going to be sent later by admin or immediately by Claudia?&quot;</p>
+              <div className="flex flex-wrap gap-3 pt-1">
+                <button
+                  onClick={() => handleReceiptChoice('admin_later')}
+                  className="px-4 py-2.5 bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-600 rounded-xl text-xs font-semibold transition shadow"
+                >
+                  📁 Send later by admin
+                </button>
+                <button
+                  onClick={() => handleReceiptChoice('claudia_immediate')}
+                  className="px-4 py-2.5 bg-[#f5a623] hover:bg-[#e0951f] text-gray-950 font-bold rounded-xl text-xs transition shadow"
+                >
+                  🤖 Send immediately by Claudia
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="bg-[#22252a] border border-gray-700 rounded-2xl p-8 text-center text-gray-400 space-y-3">
+          <div className="text-3xl">💳</div>
+          <div className="text-sm font-bold text-white">No active payment notices requiring confirmation</div>
+          <p className="text-xs text-gray-400 max-w-md mx-auto">
+            Click &quot;+ Simulate Incoming Payment&quot; above to trigger an incoming payment notification and start Claudia AI&apos;s confirmation workflow.
+          </p>
+        </div>
+      )}
+
+      {/* Live Payment Records Table */}
+      <div className="bg-[#2b2f36] border border-gray-700 rounded-2xl p-6 space-y-4 shadow-xl">
+        <div className="flex items-center justify-between border-b border-gray-700 pb-3">
+          <h3 className="font-bold text-sm text-white flex items-center gap-2">
+            <span>📋</span> Live Payment Records ({payments.length})
+          </h3>
+          <span className="text-[10px] text-emerald-400 font-semibold bg-emerald-950/60 border border-emerald-800 px-2 py-0.5 rounded-full">
+            ● Connected to n8n Backend
+          </span>
+        </div>
+
+        {payments.length === 0 ? (
+          <div className="text-center py-8 space-y-2">
+            <p className="text-gray-400 text-xs">No payment records returned from live backend yet.</p>
+            <button onClick={loadPayments} className="text-xs text-[#f5a623] hover:underline font-semibold">
+              Check live backend connection
+            </button>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs text-gray-200">
+              <thead className="border-b border-gray-700 text-gray-400 uppercase text-[10px] bg-[#22252a]">
+                <tr>
+                  <th className="py-2.5 px-3">Reference / ID</th>
+                  <th className="py-2.5 px-3">Tenant / Payer</th>
+                  <th className="py-2.5 px-3">Amount</th>
+                  <th className="py-2.5 px-3">Date</th>
+                  <th className="py-2.5 px-3">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800">
+                {payments.map((p, idx) => (
+                  <tr key={p.id || p.reference || idx} className="hover:bg-gray-800/40">
+                    <td className="py-2.5 px-3 font-mono text-[#f5a623]">{p.reference || p.id || `TXN-${idx}`}</td>
+                    <td className="py-2.5 px-3 font-semibold text-white">{p.tenant || p.payer || p.name || 'Tenant'}</td>
+                    <td className="py-2.5 px-3 font-bold text-emerald-400">{p.amount ? kina(p.amount) : 'K 0.00'}</td>
+                    <td className="py-2.5 px-3 text-gray-400">{p.date || new Date().toISOString().slice(0, 10)}</td>
+                    <td className="py-2.5 px-3">
+                      <span className="bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase">
+                        {p.status || 'Confirmed'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 

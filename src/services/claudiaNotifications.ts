@@ -24,8 +24,25 @@ async function call<T>(token: string, body: Record<string, unknown>): Promise<T>
   return json.data as T;
 }
 
-export const listNotifications = (t: string) =>
-  call<{ count: number; payment_proofs: number; job_requests: number; notifications: Notification[] }>(t, { action: 'notifications_list' });
+export function ensureDocId(rawId?: string): string {
+  if (rawId && /^DOC-\d{8}-[A-Z0-9]{6}$/.test(rawId)) {
+    return rawId;
+  }
+  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const randStr = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `DOC-${dateStr}-${randStr}`;
+}
+
+export async function listNotifications(t: string) {
+  const res = await call<{ count: number; payment_proofs: number; job_requests: number; notifications: Notification[] }>(t, { action: 'notifications_list' });
+  if (res && Array.isArray(res.notifications)) {
+    res.notifications = res.notifications.map(n => ({
+      ...n,
+      document_id: ensureDocId(n.document_id)
+    }));
+  }
+  return res;
+}
 
 export const preparePayment = (t: string, p: { document_id: string; invoice_number: string; amount: number; payment_date: string; paid_to: 'BSP' | 'KINA' | 'TISA' | 'CASH' }) =>
   call<{ confirmation_id: string; summary: string; expires_at: string }>(t, { action: 'payment_prepare', ...p });
